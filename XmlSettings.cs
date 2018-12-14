@@ -63,17 +63,8 @@ namespace SettingsTemplates.Settings
             var customAttributes = field.GetCustomAttributes(typeof(SettingsNodeAttribute), false);
             var customAttribute = (SettingsNodeAttribute) customAttributes[0];
             var elementName = customAttribute.ElementName ?? field.Name;
-            var loader = customAttribute.Loader;
-            var elementNameParts = elementName.Split('.');
-            var element = elements.FirstOrDefault(x => x.Name == elementNameParts[0]);
-            for (var i = 1; i < elementNameParts.Length; i++)
-            {
-                if (element == null)
-                {
-                    break;                            
-                }
-                element = element.Descendants().FirstOrDefault(x => x.Name == elementNameParts[i]);
-            }
+            var loader = customAttribute.Loader;            
+            var element = elements.FirstOrDefault(x => x.Name == elementName);            
             if (element != null)
             {
                 var value = element.Value;
