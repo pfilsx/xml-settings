@@ -9,14 +9,17 @@ namespace SettingsTemplates.Settings
 
         public string Loader;
 
+        public string Saver;
+
         public SettingsNodeAttribute()
         {
         }
 
-        public SettingsNodeAttribute(string elementName, string loader = null)
+        public SettingsNodeAttribute(string elementName, string loader = null, string saver = null)
         {
             ElementName = elementName;
             Loader = loader;
+            Saver = saver;
         }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -30,36 +31,51 @@ namespace SettingsTemplates.Settings
 
         public void Save()
         {
-            
+            var xml = GetXml();
+            xml.Save(_path);
+        }
+        
+        public void LoadDefaults()
+        {
+            var type = GetType();
+            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .Where(x => Attribute.IsDefined(x, typeof(DefaultValueAttribute))))
+            {
+                var customAttributes = field.GetCustomAttributes(typeof(DefaultValueAttribute), false);
+                var defaultValueAttribute = (DefaultValueAttribute)customAttributes[0];
+                field.SetValue(this, defaultValueAttribute.Value);
+            }
+
+            foreach (var property in type.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.GetProperty | BindingFlags.SetProperty)
+                .Where(x => Attribute.IsDefined(x, typeof(DefaultValueAttribute))))
+            {
+                var customAttributes = property.GetCustomAttributes(typeof(DefaultValueAttribute), false);
+                var defaultValueAttribute = (DefaultValueAttribute)customAttributes[0];
+                property.SetValue(this, defaultValueAttribute.Value);
+            }
         }
 
         private void LoadFromXml(XDocument document)
         {
-            if (document.Root == null || document.Root.Name != GetType().Name)
+            var type = GetType();
+            if (document.Root == null || document.Root.Name != type.Name)
             {                
                 throw new Exception("Corrupted xml settings file");
             }
-            var elements = document.Root.Descendants().ToList();
-            foreach (var field in GetType()
-                .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            var elements = document.Root.Descendants().ToList();            
+            foreach (var field in type.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.GetProperty | BindingFlags.SetProperty)
                 .Where(x => Attribute.IsDefined(x, typeof(SettingsNodeAttribute))))
             {
-                LoadElement(field, field.FieldType, elements);
+                LoadElement(field, elements);
             }
-
-
-            foreach (var property in GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public |
-                                                             BindingFlags.NonPublic | BindingFlags.GetProperty |
-                                                             BindingFlags.SetProperty)
-                .Where(x => Attribute.IsDefined(x, typeof(DefaultValueAttribute))))
-            {
-                LoadElement(property, property.PropertyType, elements);
-            }
-
         }
-
-        private void LoadElement(MemberInfo field, Type type, List<XElement> elements)
-        {
+        private void LoadElement(MemberInfo field, List<XElement> elements)
+        {            
+            var type = (field as FieldInfo)?.FieldType ?? (field as PropertyInfo)?.PropertyType;
+            if (type == null)
+            {
+                throw new Exception("SettingsAttribute must be a property or field");
+            }
             var customAttributes = field.GetCustomAttributes(typeof(SettingsNodeAttribute), false);
             var customAttribute = (SettingsNodeAttribute) customAttributes[0];
             var elementName = customAttribute.ElementName ?? field.Name;
@@ -106,12 +122,13 @@ namespace SettingsTemplates.Settings
                     }
                     else
                     {
-                        var collection = Activator.CreateInstance(type);                            
-                        if (collection.GetType().GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(ICollection<>)))
+                        var collection = Activator.CreateInstance(type);
+                        var collectionType = collection.GetType();
+                        if (collectionType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(ICollection<>)))
                         {
                             foreach (var o in objects)
                             {
-                                collection.GetType().GetMethod("Add")?.Invoke(collection, new[] {o});
+                                collectionType.GetMethod("Add")?.Invoke(collection, new[] {o});
                             }
                             obj = collection;   
                         }
@@ -143,27 +160,75 @@ namespace SettingsTemplates.Settings
                     throw new Exception($"Corrupted xml setting file: missed '{elementName}' node");
                 }                     
             }
-        }
+        }    
 
-        public void LoadDefaults()
+        private XElement GetXml()
         {
-            foreach (var field in GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                .Where(x => Attribute.IsDefined(x, typeof(DefaultValueAttribute))))
+            var type = GetType();
+            var root = new XElement(type.Name);
+            foreach (var field in type.GetMembers(BindingFlags.Instance | BindingFlags.Public |
+                                                        BindingFlags.NonPublic | BindingFlags.GetProperty |
+                                                        BindingFlags.SetProperty)
+                .Where(x => Attribute.IsDefined(x, typeof(SettingsNodeAttribute))))
             {
-                var customAttributes = field.GetCustomAttributes(typeof(DefaultValueAttribute), false);
-                var defaultValueAttribute = (DefaultValueAttribute)customAttributes[0];
-                field.SetValue(this, defaultValueAttribute.Value);
+                var element = GetElementXml(field);
+                root.Add(element);
             }
-
-            foreach (var property in GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.GetProperty | BindingFlags.SetProperty)
-                .Where(x => Attribute.IsDefined(x, typeof(DefaultValueAttribute))))
-            {
-                var customAttributes = property.GetCustomAttributes(typeof(DefaultValueAttribute), false);
-                var defaultValueAttribute = (DefaultValueAttribute)customAttributes[0];
-                property.SetValue(this, defaultValueAttribute.Value);
-            }
+            return root;
         }
-        
+
+        private XElement GetElementXml(MemberInfo field)
+        {
+            var type = (field as FieldInfo)?.FieldType ?? (field as PropertyInfo)?.PropertyType;
+            var customAttributes = field.GetCustomAttributes(typeof(SettingsNodeAttribute), false);
+            var customAttribute = (SettingsNodeAttribute) customAttributes[0];
+            var elementName = customAttribute.ElementName ?? field.Name;
+            var saver = customAttribute.Saver;
+            var element = new XElement(elementName);
+            var value = (field as PropertyInfo)?.GetValue(this, null) ?? (field as FieldInfo)?.GetValue(this);
+            if (value != null)
+            {
+                if (saver != null)
+                {
+                    var args = new[] {element, value};
+                    GetType().GetMethod(saver, BindingFlags.Public | BindingFlags.Static)
+                        ?.Invoke(null, args);
+                } else if (type.IsArray)
+                {                
+                    element.Value = string.Join(", ", (Array) value);
+                } 
+                else if (type.IsGenericType)
+                {                    
+                    if (type.GetGenericArguments().Length > 1)
+                    {                                
+                        throw new NotSupportedException("XmlSettings supports only single generics");
+                    }
+                    if (value.GetType().GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(ICollection<>)))
+                    {                        
+                        foreach (var o in (IEnumerable) value)
+                        {
+                            element.Add(new XElement("Entry"){Value = o.ToString()});
+                        }
+                    }                
+                }
+                else
+                {
+                    var method = type.GetMethod("GetXml", BindingFlags.Public | BindingFlags.Static);
+                    if (method != null)
+                    {
+                        var args = new[] {element, value};
+                        method.Invoke(null, args);
+                    }
+                    else
+                    {
+                        element.Value = value.ToString();
+                    }                    
+                }   
+            }            
+            return element;
+        }
+
+
         private object ConvertType(XElement element, Type t, string elmName)
         {
             object obj;
